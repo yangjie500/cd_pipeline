@@ -1,0 +1,352 @@
+- name: "[INFO] Initialize release helm charts tracking variables"
+  ansible.builtin.set_fact:
+    _release_helm_charts_current_step: ""
+    _release_helm_charts_failure_step: ""
+    _release_helm_charts_failure_message: ""
+    _release_helm_charts_failure_category: ""
+    _release_helm_charts_status: "pending"
+    _release_helm_charts_tracked_custom_facts: {}
+
+- name: Start Release Helm Charts Stage
+  block:
+    - name: "[INFO] Set current step - Validate stage inputs"
+      ansible.builtin.set_fact:
+        _release_helm_charts_current_step: >-
+          release_helm_charts - Step 1 - Validate stage inputs
+
+    - name: "[INFO] Step 1 - Validate stage inputs"
+      ansible.builtin.assert:
+        that:
+          - inputs.workspace_path | length > 0
+          - inputs.tenant_id | length > 0
+          - inputs.project_name | length > 0
+          - inputs.project_version | length > 0
+          - inputs.target_environment | length > 0
+          - inputs.cd_db_repo_path | length > 0
+          - inputs.git_username | length > 0
+          - inputs.git_password | length > 0
+          - inputs.git_branch_to_push | length > 0
+          - inputs.container_image_metadata_file_path | length > 0
+        fail_msg: "Required release helm charts inputs are missing."
+
+    - name: "[INFO] Step 2 - Load tenant project environment configuration"
+      block:
+        - name: Set tenant project environment config file path
+          ansible.builtin.set_fact:
+            _release_helm_charts_config_file_path: >-
+              {{
+                inputs.cd_db_repo_path
+              }}/{{ inputs.tenant_id }}/projects/{{ inputs.project_name }}/{{ inputs.target_environment }}.yml
+
+        - name: Read tenant project environment config
+          ansible.builtin.slurp:
+            src: "{{ _release_helm_charts_config_file_path }}"
+          register: _release_helm_charts_config_content_raw
+
+        - name: Parse tenant project environment config
+          ansible.builtin.set_fact:
+            _release_helm_charts_config_content: >-
+              {{
+                _release_helm_charts_config_content_raw.content
+                | b64decode
+                | from_yaml
+              }}
+
+        - name: Extract service variables
+          ansible.builtin.set_fact:
+            _release_helm_charts_service_variables: >-
+              {{
+                _release_helm_charts_config_content['service_variables']
+                | default({})
+              }}
+
+        - name: Validate service variables exist
+          ansible.builtin.assert:
+            that:
+              - _release_helm_charts_service_variables | length > 0
+              - _release_helm_charts_service_variables.repository_clone_url | default('') | length > 0
+            fail_msg: >-
+              Required service_variables are missing. Expected repository_clone_url
+
+    - name: "[INFO] Set current step - Clone Helm chart repository"
+      ansible.builtin.set_fact:
+        _release_helm_charts_current_step: >-
+          release_helm_charts - Step 3 - Clone Helm chart repository
+
+    - name: "[INFO] Step 3 - Clone Helm chart repository"
+      block:
+        - name: Built cloned repository folder path
+          ansible.builtin.set_fact:
+            _release_helm_charts_cloned_repository_folder_path: >-
+              {{
+                inputs.workspace_path
+              }}/{{ options.cloned_repository_folder_name }}
+
+        - name: Run gitlab_clone_repository role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.gitlab_clone_repository
+          vars:
+            gitlab_clone_repository_repo_url: "{{ _release_helm_charts_service_variables.repository_clone_url }}"
+            gitlab_clone_repository_dest_path: "{{ _release_helm_charts_cloned_repository_folder_path }}"
+            gitlab_clone_repository_version: "{{ options.clone_ref }}"
+            gitlab_clone_repository_token_user: "{{ inputs.git_username }}"
+            gitlab_clone_repository_token: "{{ inputs.git_password }}"
+            gitlab_clone_repository_verify_remote_server: >-
+              {{ options.git_verify_remote_server | default(false) }}
+
+      rescue:
+        - name: "[ERROR] Capture gitlab_clone_repository role failure context"
+          ansible.builtin.set_fact:
+            _release_helm_charts_failure_category: >-
+              {{
+                gitlab_clone_repository_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _release_helm_charts_failure_step: "{{ _release_helm_charts_current_step }}"
+            _release_helm_charts_failure_message: >-
+              {{
+                gitlab_clone_repository_role_output.failure_message
+                | default(ansible_failed_result.msg | default('Helm repository clone failed.'))
+              }}
+
+        - name: "[ERROR] Fail Helm repository clone step"
+          ansible.builtin.fail:
+            msg: "Helm repository clone failed."
+
+    - name: "[INFO] Set current step - Discover prepared Helm chart directories"
+      ansible.builtin.set_fact:
+        _release_helm_charts_current_step: >-
+          release_helm_charts - Step 4 - Discover prepared Helm chart directories
+
+    - name: "[INFO] Step 4 - Discover prepared Helm chart directories"
+      block:
+        - name: Find prepared Chart.yaml files
+          ansible.builtin.find:
+            paths: "{{ inputs.workspace_path }}/{{ options.helm_chart_folder_name }}"
+            patterns:
+              - Chart.yaml
+            file_type: file
+            recurse: true
+          register: _release_helm_charts_chart_yaml_find_result
+
+        - name: Keep only top-level chart Chart.yaml files, exclude dependency charts
+          ansible.builtin.set_fact:
+            _release_helm_charts_chart_yaml_files: >-
+              {{
+                _release_helm_charts_chart_yaml_find_result.files
+                | rejectattr('path', 'search', '(^|/)charts/')
+                | list
+              }}
+
+        - name: Assert prepared Helm charts exist
+          ansible.builtin.assert:
+            that:
+              - _release_helm_charts_chart_yaml_files | length > 0
+            fail_msg: "No prepared Helm charts were found."
+
+        - name: Read prepared Chart.yaml files
+          ansible.builtin.slurp:
+            src: "{{ item.path }}"
+          loop: "{{ _release_helm_charts_chart_yaml_files }}"
+          register: _release_helm_charts_chart_yaml_read_result
+
+        - name: Build release chart source paths
+          ansible.builtin.set_fact:
+            _release_helm_charts_chart_meta: >-
+              {{
+                _release_helm_charts_chart_meta | default([]) +
+                [
+                  {
+                    'chart_name': (
+                      item.content
+                      | b64decode
+                      | from_yaml
+                    ).name,
+                    'source_path': item.source | dirname,
+                    'destination_path': (
+                      inputs.workspace_path ~
+                      "/" ~ options.cloned_repository_folder_name ~
+                      "/charts/" ~
+                      (
+                        item.content
+                        | b64decode
+                        | from_yaml
+                      ).name
+                    )
+                  }
+                ]
+              }}
+          loop: "{{ _release_helm_charts_chart_yaml_read_result.results }}"
+
+        - debug:
+            var: _release_helm_charts_chart_meta ###
+
+    - name: "[INFO] Step 5 - Replace Helm charts in existing repository"
+      block:
+        - name: Remove existing charts directory in repository
+          ansible.builtin.file:
+            path: "{{ _release_helm_charts_cloned_repository_folder_path }}/charts"
+            state: absent
+
+        - name: Recreate charts directory in existing repository
+          ansible.builtin.file:
+            path: "{{ _release_helm_charts_cloned_repository_folder_path }}/charts"
+            state: directory
+            mode: "0755"
+
+        - name: Copy prepared chart directories into repository
+          ansible.builtin.copy:
+            src: "{{ item.source_path }}/"
+            dest: "{{ item.destination_path }}/"
+            remote_src: true
+            mode: preserve
+          loop: "{{ _release_helm_charts_chart_meta }}"
+          loop_control:
+            label: "{{ item.chart_name }}"
+
+        - name: Copy container metadata into repository
+          ansible.builtin.copy:
+            src: "{{ inputs.container_image_metadata_file_path }}"
+            dest: "{{ _release_helm_charts_cloned_repository_folder_path }}"
+            remote_src: true
+            mode: preserve
+
+        - name: Copy project version into repository
+          ansible.builtin.copy:
+            content: "{{ inputs.project_version }}"
+            dest: "{{ _release_helm_charts_cloned_repository_folder_path }}/VERSION"
+            mode: "0644"
+
+    - name: "[INFO] Set current step - Push Helm chart repository"
+      ansible.builtin.set_fact:
+        _release_helm_charts_current_step: >-
+          promote_helm_charts - Step 6 - Push Helm chart repository
+
+    - name: "[INFO] Step 6 - Push Helm chart repository"
+      block:
+        - name: Run gitlab_push_repository role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.gitlab_push_repository
+          vars:
+            gitlab_push_repository_src_path: "{{ _release_helm_charts_cloned_repository_folder_path }}"
+            gitlab_push_repository_branch: "{{ inputs.git_branch_to_push }}"
+            gitlab_push_repository_message: >-
+              {{
+                input.git_commit_message
+                | default(
+                    'Promote Helm charts for ' ~
+                    (inputs.tenant_id | default('unknown')) ~ '-' ~
+                    (inputs.project_name | default('unknown')) ~ '-' ~
+                    (input.project_version | default('unknown')) ~
+                    ' to ' ~
+                    (inputs.target_environment | default('unknown'))
+                  )
+              }}
+            gitlab_push_repository_url: "{{ _release_helm_charts_service_variables.repository_clone_url }}"
+            gitlab_push_repository_token_user: "{{ inputs.git_username }}"
+            gitlab_push_repository_token: "{{ inputs.git_password }}"
+            gitlab_push_repository_verify_remote_server: >-
+              {{ options.git_verify_remote_server | default(true) }}
+            gitlab_push_repository_tag: "{{ inputs.project_version | default('') }}"
+
+      rescue:
+        - name: "[ERROR] Capture gitlab_push_repository role failure context"
+          ansible.builtin.set_fact:
+            _release_helm_charts_failure_category: >-
+              {{
+                gitlab_push_repository_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _release_helm_charts_failure_step: "{{ _release_helm_charts_current_step }}"
+            _release_helm_charts_failure_message: >-
+              {{
+                gitlab_push_repository_role_output.failure_message
+                | default(ansible_failed_result.msg | default('Helm repository push failed.'))
+              }}
+
+        - name: "[ERROR] Fail Helm repository push step"
+          ansible.builtin.fail:
+            msg: "Helm repository push failed."
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _release_helm_charts_status: success
+
+  rescue:
+    - name: "[ERROR] Extract useful failure message"
+      ansible.builtin.set_fact:
+        _release_helm_charts_failure_message: >-
+          {{
+            _release_helm_charts_failure_message
+            if _release_helm_charts_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | first
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Prepare helm charts stage failed.')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record stage failure"
+      ansible.builtin.set_fact:
+        _release_helm_charts_status: "failed"
+        _release_helm_charts_failure_step: >-
+          {{
+            _release_helm_charts_failure_step
+            if _release_helm_charts_failure_step | length > 0
+            else _release_helm_charts_current_step
+          }}
+        _release_helm_charts_failure_category: >-
+          {{
+            _release_helm_charts_failure_category
+            if _release_helm_charts_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: Fail stage
+      ansible.builtin.fail:
+        msg: "Stage failed"
+
+  always:
+    - name: Build output facts
+      ansible.builtin.set_fact:
+        _release_helm_charts_tracked_custom_facts:
+          workspace_path: "{{ inputs.workspace_path }}"
+          container_image_metadata_file_path: "{{ inputs.container_image_metadata_file_path }}"
+          tenant_id: "{{ inputs.tenant_id }}"
+          project_name: "{{ inputs.project_name }}"
+          project_version: "{{ inputs.project_version }}"
+          target_environment: "{{ inputs.target_environment }}"
+          cd_db_repo_path: "{{ inputs.cd_db_repo_path }}"
+          git_branch_to_push: "{{ inputs.git_branch_to_push }}"
+
+          emitter_registration_id: "{{ inputs.emitter_registration_id }}"
+          logging_started: "{{ inputs.logging_started }}"
+
+          project_repository_url: >-
+            {{ _release_helm_charts_service_variables.repository_clone_url | default('') }}
+          cloned_repository_folder_path: "{{ _release_helm_charts_cloned_repository_folder_path | default('') }}"
+          chart_meta: "{{ _release_helm_charts_chart_meta | default([]) }}"
+
+    - name: Construct output object
+      ansible.builtin.set_fact:
+        release_helm_charts_output:
+          stage_name: "prepare_helm_charts"
+          status: "{{ _release_helm_charts_status }}"
+          failure_step: "{{ _release_helm_charts_failure_step }}"
+          failure_message: "{{ _release_helm_charts_failure_message }}"
+          failure_category: "{{ _release_helm_charts_failure_category }}"
+          variables: "{{ _release_helm_charts_tracked_custom_facts }}"
+
+    - name: Print output object
+      ansible.builtin.debug:
+        msg: "{{ release_helm_charts_output }}"

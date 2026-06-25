@@ -1,0 +1,281 @@
+---
+- name: "[INFO] Initialize extract container images tracking variables"
+  ansible.builtin.set_fact:
+    _extract_container_images_current_step: ""
+    _extract_container_images_failure_step: ""
+    _extract_container_images_failure_message: ""
+    _extract_container_images_failure_category: ""
+    _extract_container_images_status: "pending"
+    _extract_container_images_tracked_custom_facts: {}
+
+- name: Start Preprod Promotion Extract Container Images Stage
+  block:
+    - name: "[INFO] Set current step - Validate stage inputs"
+      ansible.builtin.set_fact:
+        _extract_container_images_current_step: >-
+          extract_container_images - Step 1 - Validate stage inputs
+
+    - name: "[INFO] Step 1 - Validate stage inputs"
+      ansible.builtin.assert:
+        that:
+          - inputs.workspace_path | length > 0
+          - inputs.blob_file_path | length > 0
+        fail_msg: "Required extract container images inputs are missing."
+
+    - name: "[INFO] Set current step - Extract verified blob archive"
+      ansible.builtin.set_fact:
+        _extract_container_images_current_step: >-
+          extract_container_images - Step 2 - Extract verified blob archive
+
+    - name: "[INFO] Step 2 - Extract verified blob archive"
+      block:
+        - name: Set blob extraction path
+          ansible.builtin.set_fact:
+            _extract_container_images_blob_extract_path: "{{ inputs.workspace_path }}/{{ options.extracted_blob_folder_name }}"
+
+        - name: Create blob extraction directory
+          ansible.builtin.file:
+            path: "{{ _extract_container_images_blob_extract_path }}"
+            state: directory
+            mode: "0755"
+
+        - name: Extract verified blob archive
+          ansible.builtin.unarchive:
+            src: "{{ inputs.blob_file_path }}"
+            dest: "{{ _extract_container_images_blob_extract_path }}"
+            remote_src: true
+
+    - name: "[INFO] Set current step - Discover candidate archive files"
+      ansible.builtin.set_fact:
+        _extract_container_images_current_step: >-
+          extract_container_images - Step 3 - Discover candidate archive files
+
+    - name: "[INFO] Step 3 - Discover candidate archive files"
+      block:
+        - name: Find candidate archive files
+          ansible.builtin.find:
+            paths: "{{ _extract_container_images_blob_extract_path }}"
+            patterns:
+              - "*.tar"
+              - "*.tar.gz"
+              - "*.tgz"
+            file_type: file
+            recurse: true
+          register: _extract_container_images_find_result
+
+        - name: Store candidate archive paths
+          ansible.builtin.set_fact:
+            _extract_container_images_candidate_archives: >-
+              {{
+                _extract_container_images_find_result.files
+                | map(attribute='path')
+                | list
+              }}
+
+        - name: Assert candidate archive files exist
+          ansible.builtin.assert:
+            that:
+              - _extract_container_images_candidate_archives | length > 0
+            fail_msg: "No candidate archive files were found."
+
+    - name: "[INFO] Set current step - Identify OCI container archives"
+      ansible.builtin.set_fact:
+        _extract_container_images_current_step: >-
+          extract_container_images - Step 4 - Identify OCI container archives
+
+    - name: "[INFO] Step 4 - Identify OCI container archives"
+      block:
+        - name: Check candidate archives for OCI layout contents
+          cd_cluster.pipeline_common.check_archive_contents:
+            archive_path: "{{ item }}"
+            required_files:
+              - oci-layout
+              - index.json
+          loop: "{{ _extract_container_images_candidate_archives }}"
+          register: _extract_container_images_archive_check_results
+
+        - name: Store matched OCI archive paths
+          ansible.builtin.set_fact:
+            _extract_container_images_oci_archives: >-
+              {{
+                _extract_container_images_archive_check_results.results
+                | selectattr('matched', 'equalto', true)
+                | map(attribute='archive_path')
+                | list
+              }}
+
+        - name: Assert OCI container archives were found
+          ansible.builtin.assert:
+            that:
+              - _extract_container_images_oci_archives | length > 0
+            fail_msg: "No valid OCI container archives were found."
+
+    - name: "[INFO] Set current step - Extract OCI container archives"
+      ansible.builtin.set_fact:
+        _extract_container_images_current_step: >-
+          extract_container_images - Step 5 - Extract OCI container archives
+
+    - name: "[INFO] Step 5 - Extract OCI container archives"
+      block:
+        - name: Create OCI extraction parent directory
+          ansible.builtin.file:
+            path: "{{ inputs.workspace_path }}/{{ options.extracted_oci_image_folder_name }}"
+            state: directory
+            mode: "0755"
+
+        - name: Parse OCI archive filenames
+          cd_cluster.pipeline_common.parse_structured_filename:
+            filename: "{{ item | basename }}"
+            delimiter: "{{ options.container_filename_delimiter | default('-+') }}"
+            field_names:
+              - container_name
+              - container_version
+          loop: "{{ _extract_container_images_oci_archives }}"
+          register: _extract_container_images_parsed_archive_results
+
+        - name: Build OCI archive extraction metadata
+          ansible.builtin.set_fact:
+            _extract_container_images_extraction_metadata: >-
+              {{
+                _extract_container_images_extraction_metadata | default([]) +
+                [
+                  {
+                    'archive_path': item.item,
+                    'container_name': item.parsed_data.container_name,
+                    'container_version': item.parsed_data.container_version,
+                    'extract_path': inputs.workspace_path ~
+                      '/oci-images/' ~
+                      item.parsed_data.container_name
+                  }
+                ]
+              }}
+          loop: "{{ _extract_container_images_parsed_archive_results.results }}"
+
+        - name: Create OCI archive extraction directories
+          ansible.builtin.file:
+            path: "{{ item.extract_path }}"
+            state: directory
+            mode: "0755"
+          loop: "{{ _extract_container_images_extraction_metadata }}"
+
+        - name: Extract each OCI container archive by container name
+          ansible.builtin.unarchive:
+            src: "{{ item.archive_path }}"
+            dest: "{{ item.extract_path }}"
+            remote_src: true
+          loop: "{{ _extract_container_images_extraction_metadata }}"
+
+        - name: Find OCI index.json files after extraction
+          ansible.builtin.find:
+            paths: "{{ item.extract_path }}"
+            patterns: "index.json"
+            file_type: file
+            recurse: true
+          loop: "{{ _extract_container_images_extraction_metadata }}"
+          register: _extract_container_images_index_find_results
+
+        - name: Build resolved OCI extraction metadata
+          ansible.builtin.set_fact:
+            _extract_container_images_resolved_extraction_metadata: >-
+              {{
+                _extract_container_images_resolved_extraction_metadata | default([]) +
+                [
+                  item.item | combine(
+                    {
+                      'resolved_extract_path': (
+                        item.files[0].path | dirname
+                      )
+                    }
+                  )
+                ]
+              }}
+          loop: "{{ _extract_container_images_index_find_results.results }}"
+          when:
+            - item.files | length == 1
+
+        - name: Store resolved OCI image paths
+          ansible.builtin.set_fact:
+            _extract_container_images_extraction_metadata: >-
+              {{ _extract_container_images_resolved_extraction_metadata }}
+            _extract_container_images_extracted_oci_paths: >-
+              {{
+                _extract_container_images_resolved_extraction_metadata
+                | map(attribute='resolved_extract_path')
+                | list
+              }}
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _extract_container_images_status: success
+
+  rescue:
+    - name: "[ERROR] Record extract container images stage failure"
+      ansible.builtin.set_fact:
+        _extract_container_images_failure_message: >-
+          {{
+            _extract_container_images_failure_message
+            if _extract_container_images_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | first
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Stage failed')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record extract container images stage failure"
+      ansible.builtin.set_fact:
+        _extract_container_images_status: "failed"
+        _extract_container_images_failure_step: >-
+          {{
+            _extract_container_images_failure_step
+            if _extract_container_images_failure_step | length > 0
+            else _extract_container_images_current_step
+          }}
+        _extract_container_images_failure_message: "{{ _extract_container_images_failure_message }}"
+        _extract_container_images_failure_category: >-
+          {{
+            _extract_container_images_failure_category
+            if _extract_container_images_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: "[ERROR] Fail extract container images stage"
+      ansible.builtin.fail:
+        msg: "Extract container images stage failed."
+
+  always:
+    - name: "[INFO] Build extract container images output facts"
+      ansible.builtin.set_fact:
+        _extract_container_images_tracked_custom_facts:
+          workspace_path: "{{ inputs.workspace_path }}"
+          blob_file_path: "{{ inputs.blob_file_path }}"
+          blob_extract_path: "{{ _extract_container_images_blob_extract_path | default('') }}"
+          candidate_archives: "{{ _extract_container_images_candidate_archives | default('') }}"
+          oci_archives: "{{ _extract_container_images_oci_archives | default('') }}"
+          oci_extraction_metadata: "{{ _extract_container_images_extraction_metadata | default('') }}"
+          extracted_oci_paths: "{{ _extract_container_images_extracted_oci_paths | default('') }}"
+          emitter_registration_id: "{{ inputs.emitter_registration_id | default('') }}"
+
+    - name: "[INFO] Construct extract container images output object"
+      ansible.builtin.set_fact:
+        extract_container_images_output:
+          stage_name: "extract_container_images"
+          status: "{{ _extract_container_images_status }}"
+          failure_step: "{{ _extract_container_images_failure_step }}"
+          failure_message: "{{ _extract_container_images_failure_message }}"
+          failure_category: "{{ _extract_container_images_failure_category }}"
+          variables: "{{ _extract_container_images_tracked_custom_facts }}"
+
+    - name: "[INFO] Print extract container images output object"
+      ansible.builtin.debug:
+        msg: "{{ extract_container_images_output }}"

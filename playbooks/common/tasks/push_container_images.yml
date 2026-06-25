@@ -1,0 +1,217 @@
+- name: "[INFO] Initialize push container images tracking variables"
+  ansible.builtin.set_fact:
+    _push_container_images_current_step: ""
+    _push_container_images_failure_step: ""
+    _push_container_images_failure_message: ""
+    _push_container_images_failure_category: ""
+    _push_container_images_status: "pending"
+    _push_container_images_tracked_custom_facts: {}
+
+- name: Start Preprod Promotion Push Container Images Stage
+  block:
+    - name: "[INFO] Set current step - Validate stage inputs"
+      ansible.builtin.set_fact:
+        _push_container_images_current_step: >-
+          push_container_images - Step 1 - Validate stage inputs
+
+    - name: "[INFO] Step 1 - Validate stage inputs"
+      ansible.builtin.assert:
+        that:
+          - inputs.tenant_id | length > 0
+          - inputs.project_name | length > 0
+          - inputs.target_environment | length > 0
+          - inputs.cd_db_repo_path | length > 0
+          - inputs.oci_extraction_metadata | length > 0
+          - inputs.registry_username | length > 0
+          - inputs.registry_password | length > 0
+        fail_msg: "Required push container images inputs are missing."
+
+    - name: "[INFO] Set current step - Load tenant project environment configuration"
+      ansible.builtin.set_fact:
+        _push_container_images_current_step: >-
+          push_container_images - Step 2 - Load tenant project environment configuration
+
+    - name: "[INFO] Step 2 - Load tenant project environment configuration"
+      block:
+        - name: Set tenant project environment config file path
+          ansible.builtin.set_fact:
+            _push_container_images_config_file_path: >-
+              {{
+                inputs.cd_db_repo_path
+              }}/{{ inputs.tenant_id }}/projects/{{ inputs.project_name }}/{{ inputs.target_environment }}.yml
+
+        - name: Read tenant project environment config
+          ansible.builtin.slurp:
+            src: "{{ _push_container_images_config_file_path }}"
+          register: _push_container_images_config_raw
+
+        - name: Parse tenant project environment config
+          ansible.builtin.set_fact:
+            _push_container_images_config_content: >-
+              {{
+                _push_container_images_config_raw.content
+                | b64decode
+                | from_yaml
+              }}
+
+        - name: Extract service variables
+          ansible.builtin.set_fact:
+            _push_container_images_service_variables: >-
+              {{
+                _push_container_images_config_content['service_variables']
+                | default({})
+              }}
+
+        - name: Validate service variables exist
+          ansible.builtin.assert:
+            that:
+              - _push_container_images_service_variables | length > 0
+              - _push_container_images_service_variables.container_repository_full_url | default('') | length > 0
+              - _push_container_images_service_variables.container_repository_base_url | default('') | length > 0
+            fail_msg: >-
+              Required service_variables are missing. Expected container_repository_full_url, container_repository_base_url
+
+    - name: "[INFO] Set current step - Push OCI container images to registry"
+      ansible.builtin.set_fact:
+        _push_container_images_current_step: >-
+          push_container_images - Step 3 - Push OCI container images to registry
+
+    - name: "[INFO] Step 3 - Push OCI container images to registry"
+      block:
+        - name: Push extracted OCI image to registry
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.push_image_to_registry
+          vars:
+            push_image_to_registry_src: "{{ item.resolved_extract_path }}"
+            push_image_to_registry_image_name: "{{ item.container_name }}"
+            push_image_to_registry_image_tag: "{{ item.container_version }}"
+            push_image_to_registry_registry_login_url: "{{ _push_container_images_service_variables.container_repository_base_url }}"
+            push_image_to_registry_registry_url: "{{ _push_container_images_service_variables.container_repository_full_url }}"
+            push_image_to_registry_registry_username: "{{ inputs.registry_username }}"
+            push_image_to_registry_registry_password: "{{ inputs.registry_password }}"
+            push_image_to_registry_ssl_verify: "{{ options.registry_ssl_verify }}"
+          loop: "{{ inputs.oci_extraction_metadata }}"
+          loop_control:
+            label: "{{ item.container_name }}:{{ item.container_version }}"
+          register: _push_container_images_push_loop_result
+
+        - name: Build push result summary
+          ansible.builtin.set_fact:
+            _push_container_images_push_results: >-
+              {{
+                _push_container_images_push_results | default([]) +
+                [
+                  {
+                    'container_name': item.item.container_name,
+                    'container_version': item.item.container_version,
+                    'source_path': item.item.extract_path,
+                    'image_name': (
+                      (_push_container_images_service_variables.container_repository_full_url ~ '/' ~ item.item.container_name)
+                      if _push_container_images_service_variables.container_repository_full_url | length > 0
+                      else item.item.container_name
+                    ),
+                    'image_tag': item.item.container_version,
+                    'registry_url': _push_container_images_service_variables.container_repository_full_url,
+                  }
+                ]
+              }}
+          loop: "{{ _push_container_images_push_loop_result.results }}"
+          loop_control:
+            label: "{{ item.item.container_name }}:{{ item.item.container_version }}"
+
+      rescue:
+        - name: "[ERROR] Capture push_image_to_registry role failure context"
+          ansible.builtin.set_fact:
+            _push_container_images_failure_category: >-
+              {{
+                push_image_to_registry_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _push_container_images_failure_step: "{{ _push_container_images_current_step }}"
+            _push_container_images_failure_message: >-
+              {{
+                push_image_to_registry_role_output.failure_message
+                | default(ansible_failed_result.msg | default('Container image push failed.'))
+              }}
+
+        - name: "[ERROR] Fail container image push step"
+          ansible.builtin.fail:
+            msg: "Container image push failed."
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _push_container_images_status: success
+
+  rescue:
+    - name: "[ERROR] Extract useful failure message"
+      ansible.builtin.set_fact:
+        _push_container_images_failure_message: >-
+          {{
+            _push_container_images_failure_message
+            if _push_container_images_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | first
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Push container images stage failed.')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record push container images stage failure"
+      ansible.builtin.set_fact:
+        _push_container_images_status: "failed"
+        _push_container_images_failure_step: >-
+          {{
+            _push_container_images_failure_step
+            if _push_container_images_failure_step | length > 0
+            else _push_container_images_current_step
+          }}
+        _push_container_images_failure_category: >-
+          {{
+            _push_container_images_failure_category
+            if _push_container_images_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: "[ERROR] Fail push container images stage"
+      ansible.builtin.fail:
+        msg: "Push container images stage failed."
+
+  always:
+    - name: "[INFO] Build push container images output facts"
+      ansible.builtin.set_fact:
+        _push_container_images_tracked_custom_facts:
+          tenant_id: "{{ inputs.tenant_id }}"
+          project_name: "{{ inputs.project_name }}"
+          target_environment: "{{ inputs.target_environment }}"
+          cd_db_repo_path: "{{ inputs.cd_db_repo_path }}"
+          config_file_path: "{{ _push_container_images_config_file_path | default('') }}"
+          registry_url: "{{ _push_container_images_service_variables.container_repository_full_url | default('') }}"
+          registry_login_url: "{{ _push_container_images_service_variables.container_repository_base_url | default('') }}"
+          registry_ssl_verify: "{{ options.registry_ssl_verify }}"
+          pushed_images_result: "{{ _push_container_images_push_results | default([]) }}"
+          pushed_image_count: "{{ _push_container_images_push_results | default([]) | length }}"
+          emitter_registration_id: "{{ inputs.emitter_registration_id | default('') }}"
+
+    - name: "[INFO] Construct push container images output object"
+      ansible.builtin.set_fact:
+        push_container_images_output:
+          stage_name: "push_container_images"
+          status: "{{ _push_container_images_status }}"
+          failure_step: "{{ _push_container_images_failure_step }}"
+          failure_message: "{{ _push_container_images_failure_message }}"
+          failure_category: "{{ _push_container_images_failure_category }}"
+          variables: "{{ _push_container_images_tracked_custom_facts }}"
+
+    - name: "[INFO] Print push container images output object"
+      ansible.builtin.debug:
+        msg: "{{ push_container_images_output }}"

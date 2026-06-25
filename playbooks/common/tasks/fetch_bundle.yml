@@ -1,0 +1,194 @@
+---
+- name: "[INFO] Initialize fetch bundle tracking variables"
+  ansible.builtin.set_fact:
+    _fetch_bundle_current_step: ""
+    _fetch_bundle_failure_step: ""
+    _fetch_bundle_failure_message: ""
+    _fetch_bundle_failure_category: ""
+    _fetch_bundle_status: "pending"
+    _fetch_bundle_tracked_custom_facts: {}
+
+- name: Manage Preprod Promotion Fetch Bundle Stage
+  block:
+    - name: "[INFO] Set current step - Validate SFTP environment inputs"
+      ansible.builtin.set_fact:
+        _fetch_bundle_current_step: >-
+          fetch_bundle - Step 1 - Validate SFTP environment inputs
+
+    - name: "[INFO] Step 1 - Validate SFTP environment inputs"
+      block:
+        - name: Run validate_environment_inputs role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.validate_environment_inputs
+          vars:
+            validate_environment_inputs_check_variables:
+              - SFTP_HOST
+            validate_environment_inputs_check_secrets:
+              - SFTP_USERNAME
+              - SFTP_PASSWORD
+
+      rescue:
+        - name: "[ERROR] Capture validate_environment_inputs role failure context"
+          ansible.builtin.set_fact:
+            _fetch_bundle_failure_category: >-
+              {{
+                validate_environment_inputs_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _fetch_bundle_failure_step: "{{ _fetch_bundle_current_step }}"
+            _fetch_bundle_failure_message: >-
+              {{
+                validate_environment_inputs_role_output.failure_message
+                | default(ansible_failed_result.msg | default('SFTP environment validation failed.'))
+              }}
+
+        - name: "[ERROR] Fail SFTP environment validation step"
+          ansible.builtin.fail:
+            msg: "SFTP environment validation failed."
+
+    - name: "[INFO] Set current step - Validate stage inputs"
+      ansible.builtin.set_fact:
+        _fetch_bundle_current_step: >-
+          fetch_bundle - Step 2 - Validate stage inputs
+
+    - name: "[INFO] Step 2 - Validate stage inputs"
+      ansible.builtin.assert:
+        that:
+          - inputs.workspace_path | length > 0
+          - inputs.release_bundle_remote_path | length > 0
+          - inputs.release_bundle_filename | length > 0
+          - inputs.tenant_id | length > 0
+          - inputs.project_name | length > 0
+          - inputs.project_version | length > 0
+        fail_msg: "Required fetch bundle inputs from init stage are missing."
+
+    - name: "[INFO] Set current step - Fetch release bundle from SFTP"
+      ansible.builtin.set_fact:
+        _fetch_bundle_current_step: >-
+          fetch_bundle - Step 3 - Fetch release bundle from SFTP
+
+    - name: "[INFO] Step 3 - Fetch release bundle from SFTP"
+      block:
+        - name: Set local bundle path
+          ansible.builtin.set_fact:
+            _fetch_bundle_local_path: >-
+              {{ inputs.workspace_path }}/{{ inputs.release_bundle_filename }}
+
+        - name: Run fetch_files_sftp role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.fetch_files_sftp
+          vars:
+            fetch_files_sftp_username: >-
+              {{
+                validate_environment_inputs_role_output
+                .variables.validated_secrets.SFTP_USERNAME
+              }}
+            fetch_files_sftp_sftp_password: >-
+              {{
+                validate_environment_inputs_role_output
+                .variables.validated_secrets.SFTP_PASSWORD
+              }}
+            fetch_files_sftp_sftp_ip: >-
+              {{
+                validate_environment_inputs_role_output
+                .variables.validated_variables.SFTP_HOST
+              }}
+            fetch_files_sftp_file_path_src: "{{ inputs.release_bundle_remote_path }}"
+            fetch_files_sftp_file_path_dest: "{{ _fetch_bundle_local_path }}"
+            fetch_files_sftp_connect_timeout: >-
+              {{ options.sftp_connect_timeout | default(5) }}
+            fetch_files_sftp_connection_attempts: >-
+              {{ options.sftp_connection_attempts | default(1) }}
+            fetch_files_sftp_strict_host_key_checking: >-
+              {{ options.sftp_strict_host_key_checking | default(false) }}
+
+      rescue:
+        - name: "[ERROR] Capture fetch_files_sftp role failure context"
+          ansible.builtin.set_fact:
+            _fetch_bundle_failure_category: >-
+              {{
+                fetch_files_sftp_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _fetch_bundle_failure_step: "{{ _fetch_bundle_current_step }}"
+            _fetch_bundle_failure_message: >-
+              {{
+                fetch_files_sftp_role_output.failure_message
+                | default(ansible_failed_result.msg | default('SFTP bundle fetch failed.'))
+              }}
+
+        - name: "[ERROR] Fail bundle fetch step"
+          ansible.builtin.fail:
+            msg: "Release bundle fetch from SFTP failed."
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _fetch_bundle_status: success
+
+  rescue:
+    - name: "[ERROR] Extract useful failure message"
+      ansible.builtin.set_fact:
+        _fetch_bundle_failure_message: >-
+          {{
+            _fetch_bundle_failure_message
+            if _fetch_bundle_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | list
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Stage failed')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record stage failure"
+      ansible.builtin.set_fact:
+        _init_status: "failed"
+        _fetch_bundle_failure_step: >-
+          {{
+            _fetch_bundle_failure_step
+            if _fetch_bundle_failure_step | length > 0
+            else _init_current_step
+          }}
+        _fetch_bundle_failure_category: >-
+          {{
+            _fetch_bundle_failure_category
+            if _fetch_bundle_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: "[ERROR] Fail stage"
+      ansible.builtin.fail:
+        msg: "Stage failed"
+
+  always:
+    - name: "[INFO] Build fetch bundle output facts"
+      ansible.builtin.set_fact:
+        _fetch_bundle_tracked_custom_facts:
+          workspace_path: "{{ inputs.workspace_path }}"
+          release_bundle_remote_path: "{{ inputs.release_bundle_remote_path }}"
+          release_bundle_filename: "{{ inputs.release_bundle_filename }}"
+          bundle_local_path: "{{ _fetch_bundle_local_path | default('') }}"
+          emitter_registration_id: "{{ inputs.emitter_registration_id }}"
+    - name: "[INFO] Construct fetch bundle output object"
+
+      ansible.builtin.set_fact:
+        fetch_bundle_output:
+          stage_name: "fetch_bundle"
+          status: "{{ _fetch_bundle_status }}"
+          failure_step: "{{ _fetch_bundle_failure_step }}"
+          failure_message: "{{ _fetch_bundle_failure_message }}"
+          failure_category: "{{ _fetch_bundle_failure_category }}"
+          variables: "{{ _fetch_bundle_tracked_custom_facts }}"
+
+    - name: "[INFO] Print fetch bundle output object"
+      ansible.builtin.debug:
+        msg: "{{ fetch_bundle_output }}"

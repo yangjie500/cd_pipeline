@@ -1,0 +1,227 @@
+---
+- name: "[INFO] Initialize init tracking variables"
+  ansible.builtin.set_fact:
+    _init_current_step: ""
+    _init_failure_step: ""
+    _init_failure_message: ""
+    _init_failure_category: ""
+    _init_status: "pending"
+    _init_tracked_custom_facts: {}
+
+    # Ignore currently no logging is enabled
+    _init_emitter_registration_id: ""
+    _init_logging_started: false
+
+- name: Start init Stage
+  block:
+    - name: "[INFO] Set current step - Validate environment inputs"
+      ansible.builtin.set_fact:
+        _init_current_step: "init - Step 1 - Validate environment inputs"
+
+    - name: "[INFO] Step 1 - Validate environment inputs"
+      block:
+        - name: Run validate_environment_inputs role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.validate_environment_inputs
+          vars:
+            validate_environment_inputs_check_variables:
+              - SFTP_HOST
+              - KEYCLOAK_TOKEN_URL
+              - LOKI_ENDPOINT
+              - CD_DB_GIT_REPO_URL
+            validate_environment_inputs_check_secrets:
+              - SFTP_USERNAME
+              - SFTP_PASSWORD
+              - KEYCLOAK_CLIENT_ID
+              - KEYCLOAK_CLIENT_SECRET
+              - CD_DB_ADMIN_USERNAME
+              - CD_DB_ADMIN_PASSWORD
+
+      rescue:
+        - name: "[ERROR] Capture validate_environment_inputs role failure context"
+          ansible.builtin.set_fact:
+            _init_failure_category: >-
+              {{
+                validate_environment_inputs_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _init_failure_step: "{{ _init_current_step }}"
+            _init_failure_message: >-
+              {{
+                validate_environment_inputs_role_output.failure_message
+                | default(ansible_failed_result.msg | default('Environment validation failed.'))
+              }}
+
+        - name: "[ERROR] Fail environment validation step"
+          ansible.builtin.fail:
+            msg: "Environment validation failed."
+
+    - name: "[INFO] Set current step - Create workspace"
+      ansible.builtin.set_fact:
+        _init_current_step: "init - Step 2 - Create temporary promotion workspace"
+
+    - name: "[INFO] Step 2 - Create and track temporary promotion workspace"
+      block:
+        - name: Create temporary promotion workspace
+          ansible.builtin.tempfile:
+            state: directory
+            path: "{{ options.promotion_workspace_parent | default('/tmp') }}"
+            prefix: "promote_to_preprod_"
+          register: _promotion_workspace
+
+    - name: "[INFO] Set current step - Parse metadata and initialize logging"
+      ansible.builtin.set_fact:
+        _init_current_step: "init - Step 3 - Parse bundle metadata and initialize logging"
+
+    - name: "[INFO] Step 3 - Parse bundle metadata and initialize logging"
+      block:
+        - name: Parse release bundle filename
+          cd_cluster.pipeline_common.parse_structured_filename:
+            # Assumption: initial bundle filename always postfix with ".bundle"
+            filename: >-
+              {{
+                inputs.release_bundle_remote_path
+                | replace('.bundle', '')
+                | basename
+              }}
+            delimiter: "{{ options.release_bundle_filename_delimiter | default('-+') }}"
+            field_names: "{{ options.parse_structured_name_format }}"
+          register: _bundle_metadata
+
+        # Init Logging here if available
+
+    - name: "[INFO] Set current step - Clone automation data repository"
+      ansible.builtin.set_fact:
+        _init_current_step: "init - Step 4 - Clone automation data repository"
+
+    - name: "[INFO] Step 4 - Clone automation data repository"
+      block:
+        - name: Set automation data repository path
+          ansible.builtin.set_fact:
+            _cd_db_repo_path: "{{ _promotion_workspace.path }}/{{ options.cd_db_repo_folder }}"
+
+        - name: Run gitlab_clone_repository role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.gitlab_clone_repository
+          vars:
+            gitlab_clone_repository_repo_url: >-
+              {{
+                validate_environment_inputs_role_output
+                .variables.validated_variables.CD_DB_GIT_REPO_URL
+              }}
+            gitlab_clone_repository_dest_path: "{{ _cd_db_repo_path }}"
+            gitlab_clone_repository_version: "{{ options.cd_db_repo_version | default('main') }}"
+            gitlab_clone_repository_token_user: >-
+              {{
+                validate_environment_inputs_role_output
+                .variables.validated_secrets.CD_DB_ADMIN_USERNAME
+              }}
+            gitlab_clone_repository_token: >-
+              {{
+                validate_environment_inputs_role_output
+                .variables.validated_secrets.CD_DB_ADMIN_PASSWORD
+              }}
+            gitlab_clone_repository_verify_remote_server: >-
+              {{ options.cd_db_repo_verify_remote_server | default(true) }}
+
+      rescue:
+        - name: "[ERROR] Capture gitlab_clone_repository role failure context"
+          ansible.builtin.set_fact:
+            _init_failure_category: >-
+              {{
+                gitlab_clone_repository_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _init_failure_step: "{{ _init_current_step }}"
+            _init_failure_message: >-
+              {{
+                gitlab_clone_repository_role_output.failure_message
+                | default(ansible_failed_result.msg | default('GitLab clone failed.'))
+              }}
+
+        - name: "[ERROR] Fail automation data repository clone step"
+          ansible.builtin.fail:
+            msg: "Automation data repository clone failed."
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _init_status: success
+
+  rescue:
+    - name: "[ERROR] Extract useful failure message"
+      ansible.builtin.set_fact:
+        _init_failure_message: >-
+          {{
+            _init_failure_message
+            if _init_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | list
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Stage failed')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record stage failure"
+      ansible.builtin.set_fact:
+        _init_status: "failed"
+        _init_failure_step: >-
+          {{
+            _init_failure_step
+            if _init_failure_step | length > 0
+            else _init_current_step
+          }}
+        _init_failure_category: >-
+          {{
+            _init_failure_category
+            if _init_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: "[ERROR] Fail stage"
+      ansible.builtin.fail:
+        msg: "Stage failed"
+
+  always:
+    - name: "[INFO] Build init output facts"
+      ansible.builtin.set_fact:
+        _init_tracked_custom_facts:
+          workspace_path: "{{ _promotion_workspace.path | default('') }}"
+          release_bundle_remote_path: "{{ inputs.release_bundle_remote_path }}"
+          release_bundle_filename: "{{ inputs.release_bundle_remote_path | basename }}"
+          tenant_id: "{{ _bundle_metadata.parsed_data.tenant_id | default('') }}"
+          project_name: "{{ _bundle_metadata.parsed_data.project_name | default('') }}"
+          project_version: "{{ _bundle_metadata.parsed_data.project_version | default('') }}"
+          bundled_datetime: "{{ _bundle_metadata.parsed_data.bundled_datetime | default('') }}"
+          cd_db_repo_url: >-
+            {{
+              validate_environment_inputs_role_output
+              .variables.validated_variables.CD_DB_GIT_REPO_URL | default('') 
+            }}
+          cd_db_repo_version: "{{ options.cd_db_repo_version | default('main') }}"
+          cd_db_repo_path: "{{ _cd_db_repo_path | default('') }}"
+          emitter_registration_id: "{{ _init_emitter_registration_id | default('') }}"
+          logging_started: "{{ _init_logging_started }}"
+
+    - name: "[INFO] Construct init output object"
+      ansible.builtin.set_fact:
+        init_output:
+          stage_name: "init"
+          status: "{{ _init_status }}"
+          failure_step: "{{ _init_failure_step }}"
+          failure_message: "{{ _init_failure_message }}"
+          failure_category: "{{ _init_failure_category }}"
+          variables: "{{ _init_tracked_custom_facts }}"
+
+    - name: "[INFO] Print init output object"
+      ansible.builtin.debug:
+        msg: "{{ init_output }}"

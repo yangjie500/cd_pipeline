@@ -1,0 +1,205 @@
+---
+- name: "[INFO] Initialize verify bundle tracking variables"
+  ansible.builtin.set_fact:
+    _verify_bundle_current_step: ""
+    _verify_bundle_failure_step: ""
+    _verify_bundle_failure_message: ""
+    _verify_bundle_failure_category: ""
+    _verify_bundle_status: "pending"
+    _verify_bundle_tracked_custom_facts: {}
+
+- name: Start Preprod Promotion Verify Bundle Stage
+  block:
+    - name: "[INFO] Set current step - Validate stage inputs"
+      ansible.builtin.set_fact:
+        _verify_bundle_current_step: "verify_bundle - Step 1 - Validate stage inputs"
+
+    - name: "[INFO] Step 1 - Validate stage inputs"
+      ansible.builtin.assert:
+        that:
+          - inputs.workspace_path | length > 0
+          - inputs.bundle_local_path | length > 0
+          - inputs.cd_db_repo_path | length > 0
+          - inputs.tenant_id | length > 0
+          - inputs.project_name | length > 0
+        fail_msg: "Required verify bundle inputs are missing."
+
+    - name: "[INFO] Set current step - Extract bundle archive"
+      ansible.builtin.set_fact:
+        _verify_bundle_current_step: "verify_bundle - Step 2 - Extract bundle archive"
+
+    - name: "[INFO] Step 2 - Extract bundle archive"
+      block:
+        - name: Set bundle extraction path
+          ansible.builtin.set_fact:
+            _verify_bundle_extract_path: "{{ inputs.workspace_path }}/{{ options.bundle_extraction_folder_name }}"
+
+        - name: Create bundle extraction directory
+          ansible.builtin.file:
+            path: "{{ _verify_bundle_extract_path }}"
+            state: directory
+            mode: "0755"
+
+        - name: Extract .bundle archive
+          ansible.builtin.unarchive:
+            src: "{{ inputs.bundle_local_path }}"
+            dest: "{{ _verify_bundle_extract_path }}"
+            remote_src: true
+
+    - name: "[INFO] Set current step - Resolve blob, signature, and public key paths"
+      ansible.builtin.set_fact:
+        _verify_bundle_current_step: >-
+          verify_bundle - Step 3 - Resolve blob, signature, and public key paths
+
+    - name: "[INFO] Step 3 - Resolve blob, signature, and public key paths"
+      block:
+        - name: Find extracted tar.gz blob
+          ansible.builtin.find:
+            paths: "{{ _verify_bundle_extract_path }}"
+            patterns: "*.tar.gz"
+            file_type: file
+            recurse: true
+          register: _verify_bundle_blob_find_result
+
+        - name: Find extracted tar.gz signature
+          ansible.builtin.find:
+            paths: "{{ _verify_bundle_extract_path }}"
+            patterns: "*.tar.gz.sig"
+            file_type: file
+            recurse: true
+          register: _verify_bundle_sig_find_result
+
+        - name: Validate extracted verification files
+          ansible.builtin.assert:
+            that:
+              - _verify_bundle_blob_find_result.files | length == 1
+              - _verify_bundle_sig_find_result.files | length == 1
+            fail_msg: >-
+              Expected exactly one .tar.gz file and one .tar.gz.sig file
+              inside the extracted bundle.
+
+        - name: Set verification file paths
+          ansible.builtin.set_fact:
+            _verify_bundle_blob_file_path: "{{ _verify_bundle_blob_find_result.files[0].path }}"
+            _verify_bundle_sig_file_path: "{{ _verify_bundle_sig_find_result.files[0].path }}"
+            _verify_bundle_pub_key_file_path: >-
+              {{ inputs.cd_db_repo_path }}/{{ inputs.tenant_id }}/{{ options.public_key_file_name }}
+
+        - name: Validate tenant public key exists
+          ansible.builtin.stat:
+            path: "{{ _verify_bundle_pub_key_file_path }}"
+          register: _verify_bundle_pub_key_stat
+
+        - name: Fail if tenant public key is missing
+          ansible.builtin.assert:
+            that:
+              - _verify_bundle_pub_key_stat.stat.exists
+            fail_msg: "Tenant public key does not exist."
+
+    - name: "[INFO] Set current step - Verify bundle signature"
+      ansible.builtin.set_fact:
+        _verify_bundle_current_step: "verify_bundle - Step 4 - Verify bundle signature"
+
+    - name: "[INFO] Step 4 - Verify bundle signature"
+      block:
+        - name: Run verify_signature_cosign role
+          ansible.builtin.include_role:
+            name: cd_cluster.pipeline_common.verify_signature_cosign
+          vars:
+            verify_signature_cosign_blob_file_path: "{{ _verify_bundle_blob_file_path }}"
+            verify_signature_cosign_sig_file_path: "{{ _verify_bundle_sig_file_path }}"
+            verify_signature_cosign_pub_key_file_path: "{{ _verify_bundle_pub_key_file_path }}"
+
+      rescue:
+        - name: "[ERROR] Capture verify_signature_cosign role failure context"
+          ansible.builtin.set_fact:
+            _verify_bundle_failure_category: >-
+              {{
+                verify_signature_cosign_role_output.failure_category
+                | default('unclassified_error')
+              }}
+            _verify_bundle_failure_step: "{{ _verify_bundle_current_step }}"
+            _verify_bundle_failure_message: >-
+              {{
+                verify_signature_cosign_role_output.failure_message
+                | default(ansible_failed_result.msg | default('Bundle signature verification failed.'))
+              }}
+
+        - name: "[ERROR] Fail bundle signature verification step"
+          ansible.builtin.fail:
+            msg: "Bundle signature verification failed."
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _verify_bundle_status: success
+
+  rescue:
+    - name: "[ERROR] Extract useful failure message"
+      ansible.builtin.set_fact:
+        _verify_bundle_failure_message: >-
+          {{
+            _verify_bundle_failure_message
+            if _verify_bundle_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | list
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Stage failed')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record stage failure"
+      ansible.builtin.set_fact:
+        _init_status: "failed"
+        _verify_bundle_failure_step: >-
+          {{
+            _verify_bundle_failure_step
+            if _verify_bundle_failure_step | length > 0
+            else _init_current_step
+          }}
+        _verify_bundle_failure_category: >-
+          {{
+            _verify_bundle_failure_category
+            if _verify_bundle_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: "[ERROR] Fail stage"
+      ansible.builtin.fail:
+        msg: "Stage failed"
+
+  always:
+    - name: "[INFO] Build verify bundle output facts"
+      ansible.builtin.set_fact:
+        _verify_bundle_tracked_custom_facts:
+          workspace_path: "{{ inputs.workspace_path }}"
+          bundle_local_path: "{{ inputs.bundle_local_path }}"
+          bundle_extract_path: "{{ _verify_bundle_extract_path | default('') }}"
+          blob_file_path: "{{ _verify_bundle_blob_file_path | default('') }}"
+          signature_file_path: "{{ _verify_bundle_sig_file_path | default('') }}"
+          public_key_file_path: "{{ _verify_bundle_pub_key_file_path | default('') }}"
+          tenant_id: "{{ inputs.tenant_id }}"
+          emitter_registration_id: "{{ inputs.emitter_registration_id }}"
+
+    - name: "[INFO] Construct verify bundle output object"
+      ansible.builtin.set_fact:
+        verify_bundle_output:
+          stage_name: "verify_bundle"
+          status: "{{ _verify_bundle_status }}"
+          failure_step: "{{ _verify_bundle_failure_step }}"
+          failure_message: "{{ _verify_bundle_failure_message }}"
+          failure_category: "{{ _verify_bundle_failure_category }}"
+          variables: "{{ _verify_bundle_tracked_custom_facts }}"
+
+    - name: "[INFO] Print verify bundle output object"
+      ansible.builtin.debug:
+        msg: "{{ verify_bundle_output }}"

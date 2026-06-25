@@ -1,0 +1,349 @@
+- name: "[INFO] Initialize prepare helm charts tracking variables"
+  ansible.builtin.set_fact:
+    _prepare_helm_charts_current_step: ""
+    _prepare_helm_charts_failure_step: ""
+    _prepare_helm_charts_failure_message: ""
+    _prepare_helm_charts_failure_category: ""
+    _prepare_helm_charts_status: "pending"
+    _prepare_helm_charts_tracked_custom_facts: {}
+
+- name: Start Prepare Helm Charts Stage
+  block:
+    - name: "[INFO] Set current step"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_current_step: >-
+          prepare_helm_charts - Step 1 - Validate stage inputs
+
+    - name: "[INFO] Step 1 - Validate stage inputs"
+      ansible.builtin.assert:
+        that:
+          - inputs.workspace_path | length > 0
+          - inputs.blob_extract_path | length > 0
+          - inputs.cd_db_repo_path | length > 0
+          - inputs.tenant_id | length > 0
+          - inputs.project_name | length > 0
+          - inputs.target_environment | length > 0
+          - inputs.container_image_metadata is defined
+        fail_msg: "Required prepare helm charts inputs are missing."
+
+    - name: "[INFO] Set current step"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_current_step: >-
+          prepare_helm_charts - Step 2 - Discover Helm chart archives
+
+    - name: "[INFO] Step 2 - Discover Helm chart archives"
+      block:
+        - name: Find candidate archives
+          ansible.builtin.find:
+            paths: "{{ inputs.blob_extract_path }}"
+            recurse: true
+            patterns:
+              - "*.tar.gz"
+              - "*.tgz"
+            file_type: file
+          register: _prepare_helm_charts_find_archives_result
+
+        - name: Store candidate archives
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_candidate_archives: >-
+              {{
+                _prepare_helm_charts_find_archives_result.files
+                | map(attribute='path')
+                | list
+              }}
+
+        - name: Check archive contains Chart.yaml
+          cd_cluster.pipeline_common.check_archive_contents:
+            archive_path: "{{ item }}"
+            required_files:
+              - Chart.yaml
+          loop: "{{ _prepare_helm_charts_candidate_archives }}"
+          register: _prepare_helm_charts_archive_check_result
+
+        - name: Build helm archive list
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_helm_archives: >-
+              {{
+                _prepare_helm_charts_archive_check_result.results
+                | selectattr('matched', 'equalto', true)
+                | map(attribute='archive_path')
+                | list
+              }}
+
+        - name: Assert helm charts discovered
+          ansible.builtin.assert:
+            that:
+              - _prepare_helm_charts_helm_archives | length > 0
+            fail_msg: "No helm chart archives found."
+
+    - name: "[INFO] Set current step"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_current_step: >-
+          prepare_helm_charts - Step 3 - Extract Helm chart archives
+
+    - name: "[INFO] Step 3 - Extract Helm chart archives"
+      block:
+        - name: Create helm extraction directory
+          ansible.builtin.file:
+            path: "{{ inputs.workspace_path }}/{{ options.helm_chart_folder_name }}"
+            state: directory
+            mode: "0755"
+
+        - name: Extract helm chart archives
+          ansible.builtin.unarchive:
+            src: "{{ item }}"
+            dest: "{{ inputs.workspace_path }}/{{ options.helm_chart_folder_name }}"
+            remote_src: true
+          loop: "{{ _prepare_helm_charts_helm_archives }}"
+
+    - name: "[INFO] Set current step"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_current_step: >-
+          prepare_helm_charts - Step 4 - Load template variables
+
+    - name: "[INFO] Step 4 - Load template variables"
+      block:
+        - name: Read common.yml
+          ansible.builtin.slurp:
+            src: >-
+              {{
+                inputs.cd_db_repo_path
+              }}/{{ inputs.tenant_id }}/projects/{{ inputs.project_name }}/common.yml
+          register: _prepare_helm_charts_common_content
+
+        - name: Read environment file
+          ansible.builtin.slurp:
+            src: >-
+              {{
+                inputs.cd_db_repo_path
+              }}/{{ inputs.tenant_id }}/projects/{{ inputs.project_name }}/{{ inputs.target_environment }}.yml
+          register: _prepare_helm_charts_environment_content
+
+        - name: Parse common variables
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_common_variables: >-
+              {{
+                (
+                  _prepare_helm_charts_common_content.content
+                  | b64decode
+                  | from_yaml
+                ).variables | default({})
+              }}
+
+        - name: Parse common service variables
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_common_service_variables: >-
+              {{
+                (
+                  _prepare_helm_charts_common_content.content
+                  | b64decode
+                  | from_yaml
+                ).service_variables | default({})
+              }}
+
+        - name: Parse environment variables
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_environment_variables: >-
+              {{
+                (
+                  _prepare_helm_charts_environment_content.content
+                  | b64decode
+                  | from_yaml
+                ).variables | default({})
+              }}
+
+        - name: Parse environment service variables
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_environment_service_variables: >-
+              {{
+                (
+                  _prepare_helm_charts_environment_content.content
+                  | b64decode
+                  | from_yaml
+                ).service_variables | default({})
+              }}
+
+        - name: Merge template variables with priority place on env var (overrides common if same key)
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_template_variables: >-
+              {{
+                _prepare_helm_charts_common_variables
+                | combine(
+                    _prepare_helm_charts_environment_variables,
+                    recursive=True
+                  )
+              }}
+
+        - name: Merge template variables with priority place on env var (overrides common if same key)
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_template_variables: >-
+              {{
+                _prepare_helm_charts_common_variables
+                | combine(
+                    _prepare_helm_charts_environment_variables,
+                    recursive=True
+                  )
+              }}
+
+        - name: Merge template service variables with priority place on env var (overrides common if same key)
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_service_variables: >-
+              {{
+                _prepare_helm_charts_common_service_variables
+                | combine(
+                    _prepare_helm_charts_environment_service_variables,
+                    recursive=True
+                  )
+              }}
+
+        - name: Build merged project configuration object
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_project_config_variables: >-
+              {{
+                _prepare_helm_charts_template_variables
+                | combine(
+                    _prepare_helm_charts_service_variables,
+                    recursive=True
+                  )
+              }}
+
+    - name: "[INFO] Set current step"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_current_step: >-
+          prepare_helm_charts - Step 5 -  Generate templated values files
+
+    - name: "[INFO] Step 5 - Generate templated values files"
+      block:
+        - name: Find default values files or {{ options.to_be_templated_values_file_name }} files
+          ansible.builtin.find:
+            paths: "{{ inputs.workspace_path }}/{{ options.helm_chart_folder_name }}"
+            recurse: true
+            patterns:
+              - "{{ options.to_be_templated_values_file_name }}"
+              - values-sk.yaml
+              - values-sk.yml
+            file_type: file
+          register: _prepare_helm_charts_values_sk_result
+
+        - name: Store default values files or {{ options.to_be_templated_values_file_name }} files
+          ansible.builtin.set_fact:
+            _prepare_helm_charts_values_sk_files: >-
+              {{
+                _prepare_helm_charts_values_sk_result.files
+                | rejectattr('path', 'search', '(^|/)charts/')
+                | map(attribute='path')
+                | list
+              }}
+
+        - name: Copy original values file before replacing placeholders
+          ansible.builtin.copy:
+            src: "{{ item }}"
+            dest: "{{ item | dirname }}/{{ item | basename | regex_replace('(\\.ya?ml)$', '-original\\1') }}"
+            remote_src: true
+            mode: preserve
+          loop: "{{ _prepare_helm_charts_values_sk_files }}"
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Sanity Check on the placeholder variables
+          ansible.builtin.debug:
+            var: _prepare_helm_charts_project_config_variables
+
+        - name: Replace placeholders directly in values-sk file
+          cd_cluster.pipeline_common.replace_placeholders:
+            path: "{{ item }}"
+            placeholders: "{{ _prepare_helm_charts_project_config_variables }}"
+            backup: false
+          loop: "{{ _prepare_helm_charts_values_sk_files }}"
+          loop_control:
+            label: "{{ item }}"
+
+    - name: "[INFO] Set current step"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_current_step: >-
+          {{
+            "prepare_helm_charts - Step 6 - Generate " ~
+            options.extra_metadata_file_name 
+          }}
+
+    - name: "[INFO] Step 6 - Generate {{ options.extra_metadata_file_name }}"
+      block:
+        - name: Write {{ options.extra_metadata_file_name }}
+          ansible.builtin.copy:
+            dest: "{{ inputs.workspace_path }}/{{ options.extra_metadata_file_name }}"
+            mode: "0644"
+            content: |
+              container_images:
+                {{ inputs.container_image_metadata | to_nice_yaml(indent=2) | indent(2, false) }}
+
+    - name: "[INFO] Stage Success"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_status: success
+
+  rescue:
+    - name: "[ERROR] Extract useful failure message"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_failure_message: >-
+          {{
+            _prepare_helm_charts_failure_message
+            if _prepare_helm_charts_failure_message | length > 0
+            else (
+              (
+                ansible_failed_result.results
+                | selectattr('failed', 'defined')
+                | selectattr('failed')
+                | map(attribute='msg')
+                | first
+              )
+              if ansible_failed_result.results is defined
+              else (
+                ansible_failed_result.stderr | default(None)
+                or ansible_failed_result.stdout | default(None)
+                or ansible_failed_result.msg | default('Prepare helm charts stage failed.')
+              )
+            )
+          }}
+
+    - name: "[ERROR] Record stage failure"
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_status: "failed"
+        _prepare_helm_charts_failure_step: >-
+          {{
+            _prepare_helm_charts_failure_step
+            if _prepare_helm_charts_failure_step | length > 0
+            else _prepare_helm_charts_current_step
+          }}
+        _prepare_helm_charts_failure_category: >-
+          {{
+            _prepare_helm_charts_failure_category
+            if _prepare_helm_charts_failure_category | length > 0
+            else 'unclassified_error'
+          }}
+
+    - name: Fail stage
+      ansible.builtin.fail:
+        msg: "Stage failed"
+
+  always:
+    - name: Build output facts
+      ansible.builtin.set_fact:
+        _prepare_helm_charts_tracked_custom_facts:
+          workspace_path: "{{ inputs.workspace_path }}"
+          merged_template_variables: "{{ _prepare_helm_charts_project_config_variables | default({}) }}"
+          extracted_chart: "{{ _prepare_helm_charts_helm_archives | default({}) }}"
+          container_image_metadata: "{{ inputs.container_image_metadata }}"
+          container_image_metadata_file_path: "{{ inputs.workspace_path }}/{{ options.extra_metadata_file_name }}"
+
+    - name: Construct output object
+      ansible.builtin.set_fact:
+        prepare_helm_charts_output:
+          stage_name: "prepare_helm_charts"
+          status: "{{ _prepare_helm_charts_status }}"
+          failure_step: "{{ _prepare_helm_charts_failure_step }}"
+          failure_message: "{{ _prepare_helm_charts_failure_message }}"
+          failure_category: "{{ _prepare_helm_charts_failure_category }}"
+          variables: "{{ _prepare_helm_charts_tracked_custom_facts }}"
+
+    - name: Print output object
+      ansible.builtin.debug:
+        msg: "{{ prepare_helm_charts_output }}"
