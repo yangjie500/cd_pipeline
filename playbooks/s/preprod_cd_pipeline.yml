@@ -4,134 +4,148 @@
   gather_facts: false
 
   tasks:
-    - name: Initialize Continuous Delivery Pipeline Environment
-      ansible.builtin.import_tasks: ../common/tasks/init.yml
-      vars:
-        inputs:
-          release_bundle_remote_path: "{{ release_bundle_remote_path }}"
-        options:
-          promotion_workspace_parent: "/tmp"
-          release_bundle_filename_delimiter: "-+"
-          parse_structured_name_format:
-            - tenant_id
-            - project_name
-            - project_version
-            - bundled_datetime
-          cd_db_repo_folder: "database"
-          cd_db_repo_version: "main"
-          cd_db_repo_verify_remote_server: true
+    - name: Run Continuous Delivery Pipeline stages
+      block:
+        - name: Initialize Continuous Delivery Pipeline Environment
+          ansible.builtin.import_tasks: ../common/tasks/init.yml
+          vars:
+            inputs:
+              release_bundle_remote_path: "{{ release_bundle_remote_path }}"
+            options:
+              promotion_workspace_parent: "/tmp"
+              release_bundle_filename_delimiter: "-+"
+              parse_structured_name_format:
+                - tenant_id
+                - project_name
+                - project_version
+                - bundled_datetime
+              cd_db_repo_folder: "database"
+              cd_db_repo_version: "main"
+              cd_db_repo_verify_remote_server: true
 
-    - name: Fetch Release Bundle from Remote Server
-      ansible.builtin.import_tasks: ../common/tasks/fetch_bundle.yml
-      vars:
-        inputs:
-          workspace_path: "{{ init_output['variables']['workspace_path'] }}"
-          release_bundle_remote_path: "{{ init_output['variables']['release_bundle_remote_path'] }}"
-          release_bundle_filename: "{{ init_output['variables']['release_bundle_filename'] }}"
-          tenant_id: "{{ init_output['variables']['tenant_id'] }}"
-          project_name: "{{ init_output['variables']['project_name'] }}"
-          project_version: "{{ init_output['variables']['project_version'] }}"
-          emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
-          logging_started: "{{ init_output['variables']['logging_started'] }}"
-        options:
-          sftp_connect_timeout: 5
-          sftp_connection_attempts: 1
-          sftp_strict_host_key_checking: false
+        - name: Fetch Release Bundle from Remote Server
+          ansible.builtin.import_tasks: ../common/tasks/fetch_bundle.yml
+          vars:
+            inputs:
+              workspace_path: "{{ init_output['variables']['workspace_path'] }}"
+              release_bundle_remote_path: "{{ init_output['variables']['release_bundle_remote_path'] }}"
+              release_bundle_filename: "{{ init_output['variables']['release_bundle_filename'] }}"
+              tenant_id: "{{ init_output['variables']['tenant_id'] }}"
+              project_name: "{{ init_output['variables']['project_name'] }}"
+              project_version: "{{ init_output['variables']['project_version'] }}"
+              emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
+              logging_started: "{{ init_output['variables']['logging_started'] }}"
+            options:
+              sftp_connect_timeout: 5
+              sftp_connection_attempts: 1
+              sftp_strict_host_key_checking: false
 
-    - name: Verify the release bundle
-      ansible.builtin.import_tasks: ../common/tasks/verify_bundle.yml
-      vars:
-        inputs:
-          workspace_path: "{{ init_output['variables']['workspace_path'] }}"
-          bundle_local_path: "{{ fetch_bundle_output['variables']['bundle_local_path'] }}"
-          cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
+        - name: Verify the release bundle
+          ansible.builtin.import_tasks: ../common/tasks/verify_bundle.yml
+          vars:
+            inputs:
+              workspace_path: "{{ init_output['variables']['workspace_path'] }}"
+              bundle_local_path: "{{ fetch_bundle_output['variables']['bundle_local_path'] }}"
+              cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
 
-          tenant_id: "{{ init_output['variables']['tenant_id'] }}"
-          project_name: "{{ init_output['variables']['project_name'] }}"
-          project_version: "{{ init_output['variables']['project_version'] }}"
-          emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
-          logging_started: "{{ init_output['variables']['logging_started'] }}"
-        options:
-          bundle_extraction_folder_name: "bundle_contents"
-          public_key_file_name: "public_key.pub"
+              tenant_id: "{{ init_output['variables']['tenant_id'] }}"
+              project_name: "{{ init_output['variables']['project_name'] }}"
+              project_version: "{{ init_output['variables']['project_version'] }}"
+              emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
+              logging_started: "{{ init_output['variables']['logging_started'] }}"
+            options:
+              bundle_extraction_folder_name: "bundle_contents"
+              public_key_file_name: "public_key.pub"
 
-    - name: Extract container images
-      ansible.builtin.import_tasks: ../common/tasks/extract_container_images.yml
-      vars:
-        inputs:
-          workspace_path: "{{ init_output['variables']['workspace_path'] }}"
-          blob_file_path: "{{ verify_bundle_output['variables']['blob_file_path'] }}"
+        - name: Extract container images
+          ansible.builtin.import_tasks: ../common/tasks/extract_container_images.yml
+          vars:
+            inputs:
+              workspace_path: "{{ init_output['variables']['workspace_path'] }}"
+              blob_file_path: "{{ verify_bundle_output['variables']['blob_file_path'] }}"
 
-          tenant_id: "{{ init_output['variables']['tenant_id'] }}"
-          project_name: "{{ init_output['variables']['project_name'] }}"
-          project_version: "{{ init_output['variables']['project_version'] }}"
-          emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
-          logging_started: "{{ init_output['variables']['logging_started'] }}"
-        options:
-          extracted_blob_folder_name: "extracted_blob_contents"
-          extracted_oci_image_folder_name: "oci-images"
-          container_filename_delimiter: "-+"
+              tenant_id: "{{ init_output['variables']['tenant_id'] }}"
+              project_name: "{{ init_output['variables']['project_name'] }}"
+              project_version: "{{ init_output['variables']['project_version'] }}"
+              emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
+              logging_started: "{{ init_output['variables']['logging_started'] }}"
+            options:
+              extracted_blob_folder_name: "extracted_blob_contents"
+              extracted_oci_image_folder_name: "oci-images"
+              container_filename_delimiter: "-+"
 
-    - name: Push container images
-      ansible.builtin.import_tasks: ../common/tasks/push_container_images.yml
-      vars:
-        inputs:
-          target_environment: "prod"
-          cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
-          oci_extraction_metadata: "{{ extract_container_images_output['variables']['oci_extraction_metadata'] }}"
-          registry_username: "anything"
-          registry_password: "{{ tenant_cred_registry_password }}"
+        - name: Push container images
+          ansible.builtin.import_tasks: ../common/tasks/push_container_images.yml
+          vars:
+            inputs:
+              target_environment: "prod"
+              cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
+              oci_extraction_metadata: "{{ extract_container_images_output['variables']['oci_extraction_metadata'] }}"
+              registry_username: "anything"
+              registry_password: "{{ tenant_cred_registry_password }}"
 
-          tenant_id: "{{ init_output['variables']['tenant_id'] }}"
-          project_name: "{{ init_output['variables']['project_name'] }}"
-          project_version: "{{ init_output['variables']['project_version'] }}"
-          emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
-          logging_started: "{{ init_output['variables']['logging_started'] }}"
-        options:
-          registry_ssl_verify: true
+              tenant_id: "{{ init_output['variables']['tenant_id'] }}"
+              project_name: "{{ init_output['variables']['project_name'] }}"
+              project_version: "{{ init_output['variables']['project_version'] }}"
+              emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
+              logging_started: "{{ init_output['variables']['logging_started'] }}"
+            options:
+              registry_ssl_verify: true
 
-    - name: Prepare Helm charts
-      ansible.builtin.import_tasks: ../common/tasks/prepare_helm_charts.yml
-      vars:
-        inputs:
-          target_environment: "prod"
-          workspace_path: "{{ init_output['variables']['workspace_path'] }}"
-          cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
-          blob_extract_path: "{{ extract_container_images_output['variables']['blob_extract_path'] }}"
-          container_image_metadata: "{{ push_container_images_output['variables']['pushed_images_result'] }}"
+        - name: Prepare Helm charts
+          ansible.builtin.import_tasks: ../common/tasks/prepare_helm_charts.yml
+          vars:
+            inputs:
+              target_environment: "prod"
+              workspace_path: "{{ init_output['variables']['workspace_path'] }}"
+              cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
+              blob_extract_path: "{{ extract_container_images_output['variables']['blob_extract_path'] }}"
+              container_image_metadata: "{{ push_container_images_output['variables']['pushed_images_result'] }}"
 
-          tenant_id: "{{ init_output['variables']['tenant_id'] }}"
-          project_name: "{{ init_output['variables']['project_name'] }}"
-          project_version: "{{ init_output['variables']['project_version'] }}"
-          emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
-          logging_started: "{{ init_output['variables']['logging_started'] }}"
+              tenant_id: "{{ init_output['variables']['tenant_id'] }}"
+              project_name: "{{ init_output['variables']['project_name'] }}"
+              project_version: "{{ init_output['variables']['project_version'] }}"
+              emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
+              logging_started: "{{ init_output['variables']['logging_started'] }}"
 
-        options:
-          helm_chart_folder_name: "helm-charts"
-          to_be_templated_values_file_name: "values-sk.yaml"
-          extra_metadata_file_name: "container-image-meta.yaml"
+            options:
+              helm_chart_folder_name: "helm-charts"
+              to_be_templated_values_file_name: "values-sk.yaml"
+              extra_metadata_file_name: "container-image-meta.yaml"
 
-    - name: Push Helm charts
-      ansible.builtin.import_tasks: ../common/tasks/release_helm_charts.yml
-      vars:
-        inputs:
-          target_environment: "prod"
-          workspace_path: "{{ init_output['variables']['workspace_path'] }}"
-          cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
-          container_image_metadata_file_path: >-
-            {{ prepare_helm_charts_output['variables']['container_image_metadata_file_path'] }}
-          git_username: "anything"
-          git_password: "{{ tenant_cred_repo_password }}"
-          git_branch_to_push: "staging"
+        - name: Push Helm charts
+          ansible.builtin.import_tasks: ../common/tasks/release_helm_charts.yml
+          vars:
+            inputs:
+              target_environment: "prod"
+              workspace_path: "{{ init_output['variables']['workspace_path'] }}"
+              cd_db_repo_path: "{{ init_output['variables']['cd_db_repo_path'] }}"
+              container_image_metadata_file_path: >-
+                {{ prepare_helm_charts_output['variables']['container_image_metadata_file_path'] }}
+              git_username: "anything"
+              git_password: "{{ tenant_cred_repo_password }}"
+              git_branch_to_push: "staging"
 
-          tenant_id: "{{ init_output['variables']['tenant_id'] }}"
-          project_name: "{{ init_output['variables']['project_name'] }}"
-          project_version: "{{ init_output['variables']['project_version'] }}"
-          emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
-          logging_started: "{{ init_output['variables']['logging_started'] }}"
-        options:
-          helm_chart_folder_name: "helm-charts"
-          cloned_repository_folder_name: "helm-chart-git-repository"
-          clone_ref: "staging"
-          git_verify_remote_server: true
-          git_commit_message: ""
+              tenant_id: "{{ init_output['variables']['tenant_id'] }}"
+              project_name: "{{ init_output['variables']['project_name'] }}"
+              project_version: "{{ init_output['variables']['project_version'] }}"
+              emitter_registration_id: "{{ init_output['variables']['emitter_registration_id'] }}"
+              logging_started: "{{ init_output['variables']['logging_started'] }}"
+            options:
+              helm_chart_folder_name: "helm-charts"
+              cloned_repository_folder_name: "helm-chart-git-repository"
+              clone_ref: "staging"
+              git_verify_remote_server: true
+              git_commit_message: ""
+
+      always:
+        - name: Clean up temporary workspace
+          ansible.builtin.file:
+            path: "{{ cleanup_workspace_path }}"
+            state: absent
+          vars:
+            cleanup_workspace_path: >-
+              {{ (init_output | default({})).get('variables', {}).get('workspace_path', '') }}
+          when:
+            - cleanup_workspace_path | length > 0
+            - cleanup_workspace_path is match('^/tmp/.+')
