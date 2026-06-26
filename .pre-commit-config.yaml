@@ -1,0 +1,27 @@
+---
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: debug-statements
+      - id: end-of-file-fixer
+      # - id: no-commit-to-branch
+      #   args: [--branch, main]
+      - id: trailing-whitespace
+        # Excludes README.md files specifically within the roles structure
+        exclude: ^roles/.*README\.md$
+
+  - repo: https://github.com/asottile/add-trailing-comma
+    rev: v3.0.0
+    hooks:
+      - id: add-trailing-comma
+
+  # - repo: https://github.com/ansible/ansible-lint
+  #   rev: v26.4.0
+  #   hooks:
+  #     - id: ansible-lint
+  #       language_version: python3.12
+  #       additional_dependencies:
+  #         - ansible-core==2.20.4

@@ -214,7 +214,7 @@
 
     - name: "[INFO] Step 5 - Generate templated values files"
       block:
-        - name: Find default values files or {{ options.to_be_templated_values_file_name }} files
+        - name: Find default values files or {{ options.to_be_templated_values_file_name }}
           ansible.builtin.find:
             paths: "{{ inputs.workspace_path }}/{{ options.helm_chart_folder_name }}"
             recurse: true
@@ -225,7 +225,7 @@
             file_type: file
           register: _prepare_helm_charts_values_sk_result
 
-        - name: Store default values files or {{ options.to_be_templated_values_file_name }} files
+        - name: Store default values files or {{ options.to_be_templated_values_file_name }}
           ansible.builtin.set_fact:
             _prepare_helm_charts_values_sk_files: >-
               {{
@@ -263,7 +263,7 @@
         _prepare_helm_charts_current_step: >-
           {{
             "prepare_helm_charts - Step 6 - Generate " ~
-            options.extra_metadata_file_name 
+            options.extra_metadata_file_name
           }}
 
     - name: "[INFO] Step 6 - Generate {{ options.extra_metadata_file_name }}"

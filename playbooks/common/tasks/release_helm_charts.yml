@@ -178,9 +178,6 @@
               }}
           loop: "{{ _release_helm_charts_chart_yaml_read_result.results }}"
 
-        - debug:
-            var: _release_helm_charts_chart_meta ###
-
     - name: "[INFO] Step 5 - Replace Helm charts in existing repository"
       block:
         - name: Remove existing charts directory in repository

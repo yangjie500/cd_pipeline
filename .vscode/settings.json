@@ -1,34 +1,32 @@
 {
-    "ansible.python.interpreterPath": "./custom-venv/bin/python",
-    "ansible.python.activationScript": "./custom-venv/bin/activate",
-    "ansible.validation.lint.path": "./custom-venv/bin/ansible-lint",
-    "python.terminal.activateEnvironment": true,
-    "files.associations": {
-        "roles/**/*.yml": "ansible",
-        "roles/**/*.yaml": "ansible",
-        "extensions/molecule/**/*.yml": "ansible",
-        "extensions/molecule/**/*.yaml": "ansible"
-    },
-    "editor.formatOnSave": true,
+  "ansible.python.activationScript": "~/.cd_pipline_venv/bin/activate",
+  "ansible.python.interpreterPath": "~/.cd_pipline_venv/bin/python3.12",
+  "ansible.validation.lint.path": "~/.cd_pipline_venv/bin/ansible-lint",
+  "python.terminal.activateEnvironment": true,
+  "files.associations": {
+    "roles/**/*.yml": "ansible",
+    "roles/**/*.yaml": "ansible",
+    "extensions/molecule/**/*.yml": "ansible",
+    "extensions/molecule/**/*.yaml": "ansible"
+  },
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+
+  "[ansible]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.formatOnSave": true
+  },
 
-    "[ansible]": {
-        "editor.defaultFormatter": "esbenp.prettier-vscode",
-        "editor.formatOnSave": true
-    },
-
-    "[yaml]": {
-        "editor.defaultFormatter": "esbenp.prettier-vscode",
-        "editor.formatOnSave": true
-    },
-    "[python]": {
+  "[yaml]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.formatOnSave": true
+  },
+  "[python]": {
     "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {
-        "source.organizeImports": "always"
-        },
-    },
-    "python.analysis.extraPaths": [
-        "${workspaceFolder}/../../.."
-    ]
+      "source.organizeImports": "always"
+    }
+  },
+  "python.analysis.extraPaths": ["${workspaceFolder}/../../.."]
 }

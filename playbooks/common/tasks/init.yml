@@ -205,7 +205,7 @@
           cd_db_repo_url: >-
             {{
               validate_environment_inputs_role_output
-              .variables.validated_variables.CD_DB_GIT_REPO_URL | default('') 
+              .variables.validated_variables.CD_DB_GIT_REPO_URL | default('')
             }}
           cd_db_repo_version: "{{ options.cd_db_repo_version | default('main') }}"
           cd_db_repo_path: "{{ _cd_db_repo_path | default('') }}"
