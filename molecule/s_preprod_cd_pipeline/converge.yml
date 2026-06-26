@@ -1,0 +1,6 @@
+---
+- name: "[SUCCESS SCENARIO] Run release_to_preprod playbook"
+  ansible.builtin.import_playbook: ../../playbooks/s/preprod_cd_pipeline.yml
+  vars:
+    target_hosts: instance
+    release_bundle_remote_path: "{{ s_preprod_cd_pipeline_release_bundle_remote_path }}"

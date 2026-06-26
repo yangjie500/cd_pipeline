@@ -1,0 +1,20 @@
+---
+- name: Prepare SFTP server with release bundle
+  hosts: sftp-srv
+  gather_facts: false
+  tasks:
+    - name: "[SETUP] Create upload directory"
+      ansible.builtin.file:
+        path: /home/foo/upload
+        state: directory
+        owner: foo
+        mode: "0755"
+
+    - name: "[SETUP] Download sample tarball"
+      ansible.builtin.get_url:
+        url: "{{ s_preprod_cd_pipeline_sample_tarball_url }}"
+        dest: "/home/foo/upload"
+        headers:
+          X-Appwrite-Project: "{{ s_preprod_cd_pipeline_sample_s3_secret_api_key }}"
+          X-Appwrite-Key: "{{ s_preprod_cd_pipeline_sample_s3_secret_api_secret }}"
+        mode: "0644"
