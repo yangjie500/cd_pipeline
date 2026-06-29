@@ -229,12 +229,12 @@
             gitlab_push_repository_branch: "{{ inputs.git_branch_to_push }}"
             gitlab_push_repository_message: >-
               {{
-                input.git_commit_message
+                inputs.git_commit_message
                 | default(
                     'Promote Helm charts for ' ~
                     (inputs.tenant_id | default('unknown')) ~ '-' ~
                     (inputs.project_name | default('unknown')) ~ '-' ~
-                    (input.project_version | default('unknown')) ~
+                    (inputs.project_version | default('unknown')) ~
                     ' to ' ~
                     (inputs.target_environment | default('unknown'))
                   )
